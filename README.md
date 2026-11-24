@@ -1,5 +1,5 @@
 # INFO5940-Team-project
-# ReceiptChef
+## ReceiptChef
 
 An app that helps international students turn grocery receipts into recipes and meal ideas into shopping lists.
 
