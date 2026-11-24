@@ -87,3 +87,9 @@ Each change lists the current text, the proposed text, and the requirement it co
 
 - Update the Streamlit example to use dish count, 15/30/45/60 time options, calorie-range radio, and `run_recipe_pipeline` instead of `run_recipe_agent`.
 - Update `calculate_calories` example to return per-dish totals with no `servings` parameter.
+
+## C-13 Package layout (added during Application Design)
+
+- **Current**: "Application code lives in `src/receiptchef/`" and "all model calls go through `src/receiptchef/llm_client.py`"
+- **Proposed**: Layered package: `src/receiptchef/ui/`, `services/`, `domain/`, `infra/`. The single LLM client moves to `src/receiptchef/infra/llm_client.py` (rule unchanged: the only module that imports `anthropic`). Add `data/dietary_terms.json` next to `data/reference_recipes.json`. Preferences file at `.receiptchef/preferences.json` (add `.receiptchef/` to `.gitignore`). Tests use `tests/fakes/fake_llm_client.py` implementing the `LLMClient` protocol.
+- **Source**: Application Design Q1 B, Q8 A, Q10 B, Q12 A; `aidlc-docs/inception/application-design/components.md`
