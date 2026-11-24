@@ -235,3 +235,10 @@
 **Context**: INCEPTION complete - milestone stop
 
 ---
+## Inception Follow-Up - technical-environment.md Updated
+**Timestamp**: 2026-11-24T08:42:21Z
+**User Input**: "Using AI-DLC: our team has reviewed technical-environment-proposed-changes.md and approves changes C-1 to C-13. Please apply them to technical-environment.md so it matches requirements.md, vision.md and README.md, and log this in audit.md. Do not start Construction."
+**AI Response**: "Applied approved changes C-1 to C-13 to technical-environment.md (the document owned by Zhiqu, per README): new intro covering onboarding, Generator (1-3 receipts, dish count, whole-set time, per-dish calories), Planner, pipeline, Plan B, and follow-up (C-1); Streamlit UI list (C-2); Anthropic SDK without tool use (C-3); Pydantic models (C-4); Stage 1 per-image extraction with explanations, duplicate flags, read-only on-receipt quantities (C-5); Stage 2 app-coordinated pipeline with max 2 revisions / 3 calls and pipeline-function table (C-6); new Onboarding, Plan B, Follow-up, and Planner sections (C-7); session data with the preferences-file exception (C-8); Testing with Hypothesis, fixture stores, report-only live test, per-unit test folders (C-9); Do NOT Use table (C-10); Security Basics for 1-3 uploads, input limits, 3-call cap, API failure retry, logging (C-11); updated example code (C-12); layered package layout, infra/llm_client.py, data/dietary_terms.json, .receiptchef/preferences.json (C-13). Naming reconciliation: C-4, C-6, and C-12 predate Application Design, so the applied text uses the approved Application Design names (ConfirmedIngredientList, Dish, FollowUpAction, find_references, apply_totals, check_plan, find_conflicts, RecipePipeline.run); coverage exclusion updated to app.py and ui/ to follow C-13. Marked technical-environment-proposed-changes.md as approved and applied, with the reconciliation list. aidlc-state.md unchanged: workflow remains at the milestone stop; Construction not started."
+**Context**: INCEPTION complete - post-milestone document update (Q6 C follow-through); no stage change
+
+---

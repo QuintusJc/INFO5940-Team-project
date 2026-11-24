@@ -1,6 +1,8 @@
 # Proposed Changes to technical-environment.md
 
-**Status**: Proposal for team review (Q6: C). `technical-environment.md` has **not** been edited. Zhiqu (document owner) and the team decide which changes to apply.
+**Status**: **Approved by the team (C-1 to C-13) and applied to `technical-environment.md` on 2026-11-24.** Originally a proposal for team review (Q6: C).
+
+**Naming reconciliation when applied**: C-4, C-6, and C-12 were written before Application Design. Where they named models or functions that Application Design (approved later) renamed, the applied text uses the approved Application Design names: `ConfirmedIngredient` -> `ConfirmedIngredientList` (plus `IngredientRow`); `Recipe` -> `Dish` (plus `RecipeIngredient`); `FollowUpRequest` -> `FollowUpAction` (plus `ChatTurn`); `search_reference_recipes` -> `find_references`; `calculate_calories` -> `apply_totals`; `check_recipe_constraints` -> `check_plan` (plus `find_conflicts` for dietary checks); `run_recipe_pipeline` -> `RecipePipeline.run`. The coverage exclusion "the Streamlit UI file" became "`app.py` and `ui/`" to follow C-13.
 **Basis**: `aidlc-docs/inception/requirements/requirements.md`
 
 Each change lists the current text, the proposed text, and the requirement it comes from.
