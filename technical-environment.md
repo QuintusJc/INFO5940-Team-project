@@ -1,6 +1,6 @@
 # Technical Environment: ReceiptChef
 
-ReceiptChef is a local web app. A user uploads a photo of a grocery receipt, and an LLM agent reads the receipt, adds the items to the user's pantry, works out which ingredients should be used first, and suggests a recipe (Chinese, Italian, Mexican, or "no preference", which picks one of the three at random) that uses the most urgent ingredients.
+ReceiptChef is a local web app that helps international students turn groceries they have already bought into practical meals. The user uploads one photo of an English-language grocery receipt. The LLM turns the receipt entries into an editable ingredient list, the user confirms or corrects it, and then the user chooses servings, maximum total time, a calorie range per serving, and a cuisine (Chinese, Italian, Mexican, or No preference). A recipe agent then suggests up to three recipes, each with ingredient quantities, steps, estimated total time, approximate calories per serving, and any extra ingredients needed.
 
 ## Language and Package Manager
 
@@ -8,173 +8,238 @@ ReceiptChef is a local web app. A user uploads a photo of a grocery receipt, and
 - **uv** for all package management (no pip, poetry, or conda)
 - `pyproject.toml` for all project and tool configuration
 - `uv.lock` committed to Git
-- Application code lives in `src/receiptchef/`, tests in `tests/`, and all AI-DLC artifacts stay in `aidlc-docs/`
+- Application code lives in `src/receiptchef/`, tests in `tests/`, bundled data in `data/`. AI-DLC artifacts stay in `aidlc-docs/`, and no application code goes there.
 
 ## Frameworks and Libraries
 
-- **Streamlit** for the user interface: image upload (`st.file_uploader`), optional phone camera capture (`st.camera_input`), pantry view, and recipe display
-- **Anthropic Python SDK** (`anthropic`) to call Claude, using its built-in **vision** (reading the receipt image) and **tool use** (the agent loop)
-- **Pydantic v2** for every structured object passed between the LLM, the tools, and the UI (receipt items, pantry items, recipes)
-- **SQLite** through Python's built-in `sqlite3` module for the local pantry database
+- **Streamlit** for the user interface:
+  - receipt upload (`st.file_uploader`)
+  - editable ingredient list (`st.data_editor`), where users rename, remove, or add ingredients and pantry staples
+  - preference form (servings, max time, calorie range, cuisine)
+  - recipe cards
+- **Anthropic Python SDK** (`anthropic`) to call Claude, using **vision** (reading the receipt photo), **structured JSON output** (the ingredient list), and **tool use** (the recipe agent)
+- **Pydantic v2** for every structured object passed between the model, the tools, and the UI (`ReceiptItem`, `ConfirmedIngredient`, `RecipePreferences`, `Recipe`, `RecipeSet`)
 - **Pillow** to validate, resize, and strip metadata from uploaded images before they are sent to the model
 - **python-dotenv** to load the API key from a local `.env` file
 
-## LLM Provider and Agent Design
+## LLM Provider and Workflow
 
-- **Provider:** Anthropic Claude API (hosted). Planned model: `claude-sonnet-5-5`. It reads receipt photos and supports tool use. The model name is set with the `RECEIPTCHEF_MODEL` environment variable, so the team can switch to `claude-haiku-5-5` to cut cost during development.
-- **Fallback:** if API credits run out, the same code path can point at a local vision model in **Ollama** (for example `qwen2.5vl`) through Ollama's OpenAI-compatible endpoint. All LLM calls go through one `llm_client.py` module so only that file changes.
-- **Agent pattern:** a single tool-using agent. Claude decides which tools to call and in what order, uses the results, and returns a final recipe. The loop stops after a maximum of **8 tool calls** per request.
-- **Agent tools (all implemented locally in Python):**
+- **Provider:** Anthropic Claude API (hosted).
+- **Planned model:** **Claude Sonnet 5.5** (`claude-sonnet-5-5`) for both stages. The model name is read from the `RECEIPTCHEF_MODEL` environment variable, so the team can use `claude-haiku-5-5` during development to reduce cost.
+- **Single client module:** all model calls go through `src/receiptchef/llm_client.py`. If API credits become a problem, only this file changes. A local Ollama vision model through Ollama's OpenAI-compatible endpoint is the backup.
 
-| Tool | What it does | Data source |
+The product works in two model stages, with a required user confirmation step between them.
+
+### Stage 1: Receipt interpretation (one vision call)
+
+- **Input:** one receipt photo.
+- **Output:** a JSON list of `ReceiptItem` objects with:
+  - `raw_text`, the text as printed, for example `"GRN ONION BCH"`
+  - `ingredient_name`, for example `"green onions"`
+  - `quantity` and `unit`, when they can be read
+  - `status`: `"food"`, `"unclear"`, or `"non_food"`
+- `non_food` items (bags, detergent, tax lines) are dropped. `unclear` items are highlighted so the user can review them.
+- If the model reports that the receipt is unreadable or not a grocery receipt, the app asks the user to upload a clearer photo. No ingredient list is shown in that case.
+- The output is validated with Pydantic. If validation fails, the app retries once, then shows an error.
+
+### User confirmation (no model call)
+
+- The user edits the ingredient list: correcting names, removing items they no longer have, and adding ingredients or pantry staples such as oil, salt, rice, or soy sauce.
+- **Only the confirmed list is sent to Stage 2.**
+
+### Stage 2: Recipe agent (tool-using agent)
+
+- **Input:** the confirmed ingredients plus `RecipePreferences`:
+  - servings: 1–6
+  - max total time: 10–120 minutes
+  - calorie range per serving: min and max kcal
+  - cuisine
+- **Output:** a `RecipeSet` with up to three `Recipe` objects. Each recipe has a title, cuisine, ingredient quantities, steps, estimated total time, approximate calories per serving, `extra_ingredients_needed`, and `assumed_pantry_items`.
+- **No preference:** the agent chooses among Chinese, Italian, and Mexican based on which fits the confirmed ingredients best, and states the chosen cuisine on each recipe.
+- **Agent loop:** Claude decides which tools to call and in what order, uses the results, and revises recipes that break the user's constraints before returning them. The loop stops after **10 tool calls**. If no valid recipe is found, the app explains which constraint could not be met (for example "no recipe under 15 minutes with these ingredients").
+
+| Tool | What it does | Implementation |
 | --- | --- | --- |
-| `parse_receipt` | Turns the receipt image into a list of food items (name, quantity, unit). Non-food items such as bags or detergent are dropped. | Claude vision, validated by Pydantic |
-| `add_to_pantry` | Saves parsed items with today's purchase date | SQLite `pantry` table |
-| `get_pantry` | Returns everything currently in the pantry with purchase dates | SQLite |
-| `lookup_shelf_life` | Returns the typical fridge or pantry shelf life in days for an ingredient | Local `data/shelf_life.json` (about 150 common ingredients) |
-| `rank_by_urgency` | Sorts pantry items by days left (shelf life minus days since purchase), most urgent first | Pure Python function |
-| `search_recipes` | Finds recipes in the chosen cuisine that use the given ingredients, so suggestions are grounded in real dishes | Local `data/recipes.json` (about 30 recipes per cuisine) |
-| `mark_used` | Removes or reduces ingredients after the user cooks a recipe | SQLite |
+| `search_reference_recipes` | Returns reference dishes for a cuisine that use some of the given ingredients, so suggestions stay close to real Chinese, Italian, and Mexican cooking | Local `data/reference_recipes.json` (about 30 dishes per cuisine: name, typical ingredients, typical total time) |
+| `calculate_calories` | Takes the model's per-ingredient calorie estimates for the quantities used (including oil and sauces) and the number of servings, and returns the total and per-serving calories. The model supplies the estimates; the arithmetic is done in Python so the totals are consistent. | Pure Python function |
+| `check_recipe_constraints` | Checks a draft recipe against the preferences and the confirmed list. Returns problems: over max time, calories outside the range, wrong cuisine, and which ingredients are not on the confirmed list (these must be listed as extra or assumed pantry items). | Pure Python function |
 
-- **Cuisine choice:** Chinese, Italian, or Mexican. "No preference" is resolved in Python with `random.choice` before the agent runs, so the result is reproducible in tests with a fixed seed.
-- **Optional dish image:** Claude does not generate images. Showing a picture of the finished dish is out of scope for the MVP. If time allows, the app will show a stock image stored with the recipe in `recipes.json` instead of generating one.
+Calorie estimates come from the model, with no external nutrition database or API in the MVP. They are always labeled **"approximate"** in the UI.
+
+### Session data
+
+- No database, no user accounts, and no ongoing pantry tracking.
+- The ingredient list, preferences, and recipes live in Streamlit `st.session_state` for the current session only.
 
 ## Cloud and Deployment
 
-- **The product runs locally**; there is no cloud deployment or hosting. Each teammate runs it on their laptop or in a GitHub Codespace with `uv run streamlit run src/receiptchef/app.py` and opens it at `http://localhost:8501`.
-- The only external service is the **Anthropic API**, called over HTTPS. All data (pantry database, uploaded images, recipe and shelf-life files) stays on the local machine.
-- No Docker, cloud database, or user accounts for the MVP. There is one local user per installation.
+- **The product runs locally**; there is no cloud deployment or hosting. Each teammate runs it on their laptop or in a GitHub Codespace with `uv run streamlit run src/receiptchef/app.py` and opens `http://localhost:8501`.
+- The only external service is the **Anthropic API**, called over HTTPS.
+- Receipt photos and results are not stored after the session ends.
+- No Docker or cloud services for the MVP.
 
 ## Testing
 
 - **pytest** with **pytest-cov**: 80% line coverage minimum for `src/receiptchef/`, excluding the Streamlit UI file
 - **ruff** for linting and formatting
-- **mypy** for type checking the tools and models
-- **No real API calls in unit tests.** The Anthropic client is replaced with a fake that returns recorded responses, so tests are free, fast, and deterministic.
-- **Receipt fixtures:** 5–10 real receipt photos (with personal details blurred) in `tests/fixtures/receipts/`, each paired with a JSON file listing the expected items. They are used for one optional, manually run integration test marked `@pytest.mark.live` that calls the real API.
-- Pure functions (`rank_by_urgency`, shelf-life lookup, pantry database operations) are tested directly with an in-memory SQLite database.
+- **mypy** for type checking models and tools
+- **No real API calls in unit tests.** `llm_client` is replaced with a fake client that returns recorded responses, so tests are free, fast, and repeatable.
+- **Pure functions** (`calculate_calories`, `check_recipe_constraints`, image preparation, Pydantic validation) are unit tested directly.
+- **Receipt fixtures:**
+  - 5–10 real receipts from local supermarkets, with card numbers and loyalty IDs blurred, stored in `tests/fixtures/receipts/`
+  - each receipt paired with a JSON file of the expected ingredients
+  - a manually run integration test marked `@pytest.mark.live` calls the real API and reports how many expected ingredients were found
+- **Calorie spot check:** `scripts/check_calories.py` compares about 10 calorie estimates against nutrition labels or reference values recorded in `tests/fixtures/calorie_reference.json`, to catch obvious errors. It is run manually, not in CI.
 
 ## Do NOT Use
 
 | Prohibited | Reason | Use Instead |
 | --- | --- | --- |
-| LangChain, LlamaIndex, CrewAI | Extra abstraction layers we don't need for one agent with a few tools; harder to debug and test | Anthropic SDK tool use directly |
-| pytesseract, EasyOCR, other OCR libraries | Extra system dependencies, and they return raw text we would still have to parse | Claude vision with Pydantic validation |
+| LangChain, LlamaIndex, CrewAI | Extra layers we don't need for one vision call and one agent with three tools; harder to debug and test | Anthropic SDK directly |
+| pytesseract, EasyOCR, other OCR libraries | Extra system dependencies, and they return raw text that still needs interpreting | Claude vision with Pydantic validation |
+| External nutrition APIs (USDA FoodData Central, Nutritionix, Edamam) | Out of scope for the MVP; adds API keys and matching logic | Model calorie estimates labeled "approximate", totals computed by `calculate_calories` |
+| SQLite, PostgreSQL, Firebase, any database | No pantry tracking or accounts in the MVP | `st.session_state` |
+| Image generation APIs (DALL·E, Stable Diffusion) | Food photos are out of scope | Text recipe cards |
 | Flask, Django, React | Too much setup for a local MVP | Streamlit |
-| PostgreSQL, MongoDB, Firebase | Needs a server or cloud account; the app runs locally | SQLite (`sqlite3`) |
 | `eval()`, `exec()`, `pickle` | Security: could run code that comes from model output | `json` parsing plus Pydantic validation |
-| Hard-coded API keys, `st.secrets` committed to Git | Secrets would be exposed in the public repo | `.env` file listed in `.gitignore`, loaded with python-dotenv |
+| Hard-coded API keys, committed `.env` or `secrets.toml` | Secrets would be exposed in the repository | `.env` file listed in `.gitignore`, loaded with python-dotenv |
 | pip, poetry, conda | Project uses uv only | uv |
 | black, flake8, isort | Replaced by one tool | ruff |
 
 ## Security Basics
 
-- `ANTHROPIC_API_KEY` lives only in a local `.env` file. `.env` is in `.gitignore`, and a `.env.example` with an empty value is committed instead.
-- **Uploads:** only JPEG, PNG, and WebP, at most 10 MB. Images are resized to a maximum of 1568 px on the long edge before sending.
-- **Privacy:** EXIF metadata (including GPS location) is stripped with Pillow before an image leaves the machine. Receipt images are not saved to disk after parsing; only the extracted food items are stored.
-- **Prompt injection:** receipt text is treated as data, never as instructions. The system prompt tells the model to ignore any instructions found in the image, and every tool input from the model is validated with Pydantic before it runs.
-- **Tool safety:** tools can only read or write the local pantry and read the two bundled JSON files. No tool runs shell commands, opens URLs, or writes outside `data/`.
-- **Limits:** a maximum of 8 tool calls per request and 2,000 output tokens per response, to control cost and prevent runaway loops.
-- **Logging:** log tool names, timings, and errors. Never log the API key or full images. Prompt logging is off by default.
-- **Food safety:** recipes show a short note that shelf-life estimates are general guidance and that users should check food before eating it. The app does not make allergy claims.
+- `ANTHROPIC_API_KEY` is stored only in a local `.env` file. `.env` is in `.gitignore`, and a `.env.example` with an empty value is committed instead.
+- **Uploads:** one image at a time, JPEG, PNG, or WebP only, at most 10 MB. Images are resized to a maximum of 1568 px on the long edge before sending.
+- **Privacy:**
+  - EXIF metadata (including GPS location) is stripped before an image leaves the machine.
+  - The system prompt tells the model to ignore payment details, card numbers, and loyalty IDs and never return them.
+  - Images and results are not written to disk.
+- **Prompt injection:** receipt text and user-typed ingredient names are treated as data, never as instructions. Ingredient names are limited to 60 characters and the list to 60 items. Every tool input from the model is validated with Pydantic before the tool runs.
+- **Tool safety:** tools only read the bundled `data/reference_recipes.json` or do arithmetic. No tool runs shell commands, opens URLs, or writes files.
+- **Limits:** a maximum of 10 tool calls and 4,000 output tokens per recipe request, to control cost and prevent runaway loops.
+- **Logging:** log stage names, tool names, timings, and errors. Never log the API key, images, or full prompts.
+- **Food safety:** recipe cards note that calories are approximate. The app makes no allergy or medical claims.
 
 ## Example Code Patterns
 
-### A typical endpoint (Streamlit page handler)
+### A typical endpoint (Streamlit page handler for the recipe step)
 
 ```python
 import streamlit as st
 
-from receiptchef.agent import run_recipe_agent
-from receiptchef.images import prepare_image, ImageValidationError
-from receiptchef.models import CuisineChoice, RecipeResult
+from receiptchef.agent import run_recipe_agent, RecipeAgentError
+from receiptchef.models import Cuisine, RecipePreferences
 
-st.title("ReceiptChef")
+st.header("2. Choose your preferences")
 
-uploaded = st.file_uploader("Upload a receipt photo", type=["jpg", "jpeg", "png", "webp"])
-cuisine = st.radio("Cuisine", [c.value for c in CuisineChoice], horizontal=True)
+confirmed = st.session_state.get("confirmed_ingredients")
+if not confirmed:
+    st.info("Upload a receipt and confirm your ingredient list first.")
+    st.stop()
 
-if uploaded and st.button("Suggest a recipe"):
+servings = st.number_input("Servings", min_value=1, max_value=6, value=2)
+max_minutes = st.slider("Max total time (minutes)", 10, 120, 30, step=5)
+kcal_min, kcal_max = st.slider("Calories per serving", 200, 1200, (400, 700), step=50)
+cuisine = st.radio("Cuisine", [c.value for c in Cuisine], horizontal=True)
+
+if st.button("Suggest recipes"):
+    prefs = RecipePreferences(
+        servings=servings,
+        max_total_minutes=max_minutes,
+        kcal_per_serving_min=kcal_min,
+        kcal_per_serving_max=kcal_max,
+        cuisine=Cuisine(cuisine),
+    )
     try:
-        image_bytes = prepare_image(uploaded.getvalue())  # validate, resize, strip EXIF
-    except ImageValidationError as e:
-        st.error(str(e))
+        with st.spinner("Finding recipes that fit your groceries..."):
+            result = run_recipe_agent(confirmed, prefs)
+    except RecipeAgentError as e:
+        st.error(f"Couldn't find a recipe: {e.reason}")
         st.stop()
 
-    with st.spinner("Reading your receipt and checking your pantry..."):
-        result: RecipeResult = run_recipe_agent(image_bytes, CuisineChoice(cuisine))
-
-    st.subheader("Use these first")
-    for item in result.urgent_items:
-        st.write(f"- {item.name}: about {item.days_left} day(s) left")
-
-    st.subheader(result.recipe.title)
-    st.markdown(result.recipe.instructions_markdown)
+    for recipe in result.recipes:
+        with st.container(border=True):
+            st.subheader(f"{recipe.title} ({recipe.cuisine})")
+            st.caption(
+                f"About {recipe.total_minutes} min · ~{recipe.kcal_per_serving} kcal per serving (approximate)"
+            )
+            st.markdown(recipe.to_markdown())
+            if recipe.extra_ingredients_needed:
+                st.warning("You'll also need: " + ", ".join(recipe.extra_ingredients_needed))
 ```
 
 ### A typical function (agent tool)
 
 ```python
-from datetime import date
-
-from receiptchef.models import PantryItem, UrgentItem
-from receiptchef.shelf_life import lookup_shelf_life
+from receiptchef.models import CalorieLine, CalorieResult
 
 
-def rank_by_urgency(items: list[PantryItem], today: date) -> list[UrgentItem]:
-    """Return pantry items sorted by days left before they spoil, most urgent first.
+def calculate_calories(lines: list[CalorieLine], servings: int) -> CalorieResult:
+    """Total the model's per-ingredient calorie estimates and divide by servings.
 
-    Items with an unknown shelf life are placed last rather than guessed.
+    Each line is one ingredient at the quantity the recipe uses, including oil and sauces,
+    with the model's estimated kcal for that quantity. Rejects impossible values instead of
+    silently accepting them, so the agent has to re-estimate.
     """
-    ranked: list[UrgentItem] = []
-    for item in items:
-        shelf_days = lookup_shelf_life(item.name)  # None if not in shelf_life.json
-        if shelf_days is None:
-            days_left = None
-        else:
-            days_left = shelf_days - (today - item.purchased_on).days
-        ranked.append(UrgentItem(name=item.name, quantity=item.quantity, days_left=days_left))
+    if servings < 1:
+        raise ValueError("servings must be at least 1")
 
-    return sorted(ranked, key=lambda u: (u.days_left is None, u.days_left or 0))
+    problems = [line.ingredient for line in lines if line.estimated_kcal < 0 or line.estimated_kcal > 5000]
+    if problems:
+        return CalorieResult(ok=False, total_kcal=0, kcal_per_serving=0, problems=problems)
+
+    total = sum(line.estimated_kcal for line in lines)
+    return CalorieResult(
+        ok=True,
+        total_kcal=round(total),
+        kcal_per_serving=round(total / servings),
+        problems=[],
+    )
 ```
 
 ### A typical test
 
 ```python
-from datetime import date
-
 import pytest
 
-from receiptchef.models import PantryItem
-from receiptchef.tools import rank_by_urgency
+from receiptchef.models import CalorieLine, Cuisine, RecipePreferences
+from receiptchef.tools import calculate_calories, check_recipe_constraints
 
 
-@pytest.fixture
-def pantry() -> list[PantryItem]:
-    return [
-        PantryItem(name="rice", quantity=1, unit="bag", purchased_on=date(2026, 11, 1)),
-        PantryItem(name="spinach", quantity=1, unit="bunch", purchased_on=date(2026, 11, 20)),
-        PantryItem(name="dragonfruit jam", quantity=1, unit="jar", purchased_on=date(2026, 11, 20)),
+def test_calories_divided_by_servings() -> None:
+    lines = [
+        CalorieLine(ingredient="chicken thigh, 400 g", estimated_kcal=840),
+        CalorieLine(ingredient="vegetable oil, 1 tbsp", estimated_kcal=120),
+        CalorieLine(ingredient="rice, 300 g cooked", estimated_kcal=390),
     ]
+    result = calculate_calories(lines, servings=3)
+    assert result.ok
+    assert result.total_kcal == 1350
+    assert result.kcal_per_serving == 450
 
 
-def test_most_perishable_item_comes_first(pantry: list[PantryItem]) -> None:
-    ranked = rank_by_urgency(pantry, today=date(2026, 11, 23))
-    assert ranked[0].name == "spinach"
+def test_impossible_calorie_estimate_is_flagged() -> None:
+    lines = [CalorieLine(ingredient="soy sauce, 1 tbsp", estimated_kcal=9000)]
+    result = calculate_calories(lines, servings=1)
+    assert not result.ok
+    assert result.problems == ["soy sauce, 1 tbsp"]
 
 
-def test_unknown_shelf_life_is_ranked_last(pantry: list[PantryItem]) -> None:
-    ranked = rank_by_urgency(pantry, today=date(2026, 11, 23))
-    assert ranked[-1].name == "dragonfruit jam"
-    assert ranked[-1].days_left is None
+def test_recipe_over_time_limit_is_reported(sample_recipe, confirmed_ingredients) -> None:
+    prefs = RecipePreferences(
+        servings=2, max_total_minutes=20, kcal_per_serving_min=300,
+        kcal_per_serving_max=800, cuisine=Cuisine.CHINESE,
+    )
+    sample_recipe.total_minutes = 45
+    problems = check_recipe_constraints(sample_recipe, prefs, confirmed_ingredients)
+    assert any("time" in p for p in problems)
 
 
-def test_agent_uses_fake_llm(fake_llm_client, sample_receipt_bytes) -> None:
+def test_agent_returns_at_most_three_recipes(fake_llm_client, confirmed_ingredients, default_prefs) -> None:
     """The agent loop runs end to end against recorded LLM responses, with no network call."""
     from receiptchef.agent import run_recipe_agent
-    from receiptchef.models import CuisineChoice
 
-    result = run_recipe_agent(sample_receipt_bytes, CuisineChoice.ITALIAN, client=fake_llm_client)
-    assert result.recipe.cuisine == "Italian"
-    assert fake_llm_client.tool_calls_made <= 8
+    result = run_recipe_agent(confirmed_ingredients, default_prefs, client=fake_llm_client)
+    assert 1 <= len(result.recipes) <= 3
+    assert fake_llm_client.tool_calls_made <= 10
 ```
